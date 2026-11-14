@@ -411,39 +411,16 @@ var belts = func() []beltTile {
 	return out
 }()
 
-// View says where things landed in the last frame, for mouse picking.
-type View struct {
-	T              int // your board's tile size in pixels
-	RivalX, RivalY int // rival board origin
-	RivalT         int // rival tile size (0 = hidden)
-}
-
-// draw renders both boards into a fw x fh frame.
-func (r *Renderer) draw(g *Game, fw, fh int, cur [2]int, sel int, t float64, rival bool) (*Frame, View) {
+// draw renders the board as large as fits in fw x fh; it returns the tile size.
+func (r *Renderer) draw(g *Game, fw, fh int, cur [2]int, sel int, t float64) (*Frame, int) {
 	f := newFrame(fw, fh)
 	f.fill(0, 0, fw, fh, hex(0x10131a), 1)
-	v := View{T: max(2, min(fw/boardW, fh/boardH))}
-	if rival {
-		// rival at half size: beside your board or under it, whichever leaves bigger tiles
-		side := min(fw*2/(boardW*3+2), fh/boardH)
-		stack := min(fw/boardW, fh*2/(boardH*3+2))
-		if v.T = max(side, stack); side >= stack {
-			v.RivalX = boardW*v.T + v.T/2
-		} else {
-			v.RivalY = boardH*v.T + v.T/2
-		}
-		if v.RivalT = v.T / 2; v.RivalT < 4 {
-			v = View{T: max(2, min(fw/boardW, fh/boardH))}
-		}
-	}
-	r.drawBoard(f, g, g.You, 0, 0, v.T, t, cur, sel)
-	if v.RivalT > 0 {
-		r.drawBoard(f, g, g.Rival, v.RivalX, v.RivalY, v.RivalT, t, [2]int{-9, -9}, -1)
-	}
-	return f, v
+	T := max(2, min(fw/boardW, fh/boardH))
+	r.drawBoard(f, g, (fw-boardW*T)/2, 0, T, t, cur, sel)
+	return f, T
 }
 
-func (r *Renderer) drawBoard(f *Frame, g *Game, b *Board, ox, oy, T int, t float64, cur [2]int, sel int) {
+func (r *Renderer) drawBoard(f *Frame, g *Game, ox, oy, T int, t float64, cur [2]int, sel int) {
 	bg := r.ground(T)
 	for y := 0; y < bg.h && oy+y < f.h; y++ {
 		w := min(bg.w, f.w-ox)
@@ -484,20 +461,20 @@ func (r *Renderer) drawBoard(f *Frame, g *Game, b *Board, ox, oy, T int, t float
 
 	// range preview under everything else
 	if cur[0] >= 0 {
-		if tw := b.towerAt(cur[0], cur[1]); tw != nil {
+		if tw := g.towerAt(cur[0], cur[1]); tw != nil {
 			cx, cy := px(float64(tw.X), float64(tw.Y))
 			f.ring(cx, cy, tw.stats().rng*float64(T), math.Max(1, float64(T)/14), hex(0xffffff), 0.55, true)
 		} else if sel >= 0 {
 			cx, cy := px(float64(cur[0]), float64(cur[1]))
-			f.ring(cx, cy, towerSpecs[sel].rng*float64(T), math.Max(1, float64(T)/14), hex(0xffffff), 0.45, true)
+			f.ring(cx, cy, towerSpecs[sel].base.rng*float64(T), math.Max(1, float64(T)/14), hex(0xffffff), 0.45, true)
 		}
 	}
 
-	for _, tw := range b.Towers {
-		r.drawTower(f, tw.Kind, tw.Lvl, tw.Aim, ox+tw.X*T, oy+tw.Y*T, T, 1, tw.Flash > 0)
+	for _, tw := range g.Towers {
+		r.drawTower(f, tw.Kind, tw.Tier, tw.Aim, ox+tw.X*T, oy+tw.Y*T, T, 1, tw.Flash > 0)
 	}
 
-	es := append([]*Enemy(nil), b.Enemies...)
+	es := append([]*Enemy(nil), g.Enemies...)
 	sort.Slice(es, func(i, j int) bool { return es[i].Dist < es[j].Dist })
 	for _, e := range es {
 		sp := enemySpecs[e.Kind]
@@ -531,7 +508,7 @@ func (r *Renderer) drawBoard(f *Frame, g *Game, b *Board, ox, oy, T int, t float
 		}
 	}
 
-	for _, e := range b.FX {
+	for _, e := range g.FX {
 		a := 1 - e.t/e.life
 		x0, y0 := px(e.x0, e.y0)
 		x1, y1 := px(e.x1, e.y1)
@@ -566,10 +543,10 @@ func (r *Renderer) drawBoard(f *Frame, g *Game, b *Board, ox, oy, T int, t float
 	if cur[0] >= 0 {
 		cx, cy := ox+cur[0]*T, oy+cur[1]*T
 		ok := true
-		if sel >= 0 && b.towerAt(cur[0], cur[1]) == nil {
-			ok = buildable(cur[0], cur[1]) && b.Money >= towerSpecs[sel].cost
+		if sel >= 0 && g.towerAt(cur[0], cur[1]) == nil {
+			ok = buildable(cur[0], cur[1]) && g.Money >= towerSpecs[sel].cost
 			if buildable(cur[0], cur[1]) {
-				r.drawTower(f, TowerKind(sel), 1, -math.Pi/2, cx, cy, T, 0.5, false)
+				r.drawTower(f, TowerKind(sel), [2]int{}, -math.Pi/2, cx, cy, T, 0.5, false)
 			}
 		}
 		col := mix(hex(0x7fd1ff), hex(0xffffff), 0.5+0.5*math.Sin(t*6))
@@ -583,16 +560,24 @@ func (r *Renderer) drawBoard(f *Frame, g *Game, b *Board, ox, oy, T int, t float
 var headPivot = [numTower][2]float64{{6, 8}, {6, 8}, {8, 8}, {8, 8}}
 var headName = [numTower]string{"gun", "cannon", "tesla", "frost"}
 
-func (r *Renderer) drawTower(f *Frame, k TowerKind, lvl int, aim float64, x, y, T int, alpha float64, flash bool) {
+func (r *Renderer) drawTower(f *Frame, k TowerKind, tier [2]int, aim float64, x, y, T int, alpha float64, flash bool) {
 	base := r.get(sprKey{"base", T, int(k), 0}, T, T, func() shader { return baseShader(k) })
 	f.blit(base, x, y, alpha)
 	rot := 0
 	if k == Gun || k == Cannon {
 		rot = int(math.Round(aim/(2*math.Pi)*32)+64) % 32
 	}
-	hs := r.get(sprKey{headName[k], T, rot, 0}, T, T, func() shader {
+	top := 0
+	if tier[0] == maxTier || tier[1] == maxTier {
+		top = 1
+	}
+	hs := r.get(sprKey{headName[k], T, rot, top}, T, T, func() shader {
 		p := headPivot[k]
-		return spriteShader(headName[k], towerAcc[k][0], towerAcc[k][1], float64(rot)*2*math.Pi/32, p[0], p[1], rgb{}, 0, true)
+		acc, dark := towerAcc[k][0], towerAcc[k][1]
+		if top == 1 {
+			acc, dark = 0xffd479, 0xb8862b
+		}
+		return spriteShader(headName[k], acc, dark, float64(rot)*2*math.Pi/32, p[0], p[1], rgb{}, 0, true)
 	})
 	f.blit(hs, x, y, alpha)
 	cx, cy := float64(x)+float64(T)/2, float64(y)+float64(T)/2
@@ -605,7 +590,9 @@ func (r *Renderer) drawTower(f *Frame, k TowerKind, lvl int, aim float64, x, y, 
 			f.disc(cx, cy-0.22*float64(T), float64(T)*0.18, hex(0xbff0ff), 0.6)
 		}
 	}
-	for i := 0; i < lvl-1; i++ { // upgrade pips
-		f.disc(float64(x)+float64(T)*(0.2+0.14*float64(i)), float64(y)+float64(T)*0.88, math.Max(1, float64(T)/18), hex(0xffd479), alpha)
+	for p, c := range [2]uint32{0xffd479, 0x7fd1ff} { // tier pips: top path gold, bottom path blue
+		for i := 0; i < tier[p]; i++ {
+			f.disc(float64(x)+float64(T)*(0.16+0.13*float64(i)), float64(y)+float64(T)*(0.8+0.12*float64(p)), math.Max(1, float64(T)/20), hex(c), alpha)
+		}
 	}
 }

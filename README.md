@@ -2,11 +2,11 @@
 
 A pixel-art tower defense game for your terminal. It looks best in [Ghostty](https://ghostty.org).
 
-Waves of scrap bots ride a conveyor toward your factory. Place towers along the conveyor and upgrade them to stop the bots. Your money comes in on a timer, like the classic tower defense battle games: spend some of it sending bots to your rival's conveyor, and your pay goes up. The rival does the same to you. Whichever factory falls first loses.
+Waves of scrap bots ride a conveyor toward your factory. Place towers along the conveyor, upgrade them along two paths, and clear 40 rounds to win. After that you can keep going in freeplay.
 
 It's made to sit in a split next to your AI agents, and they can send you messages that show up in the game.
 
-![Your board with the rival's below it](docs/screenshot.png)
+![A defended conveyor mid-round](docs/screenshot.png)
 
 ## Install
 
@@ -31,30 +31,32 @@ It works in other terminals too. At startup it asks the terminal what it support
 | --- | --- |
 | arrows / wasd / mouse | move the cursor |
 | `1`–`4` | pick a tower (press again to stop placing) |
-| Space / Enter / click | build, or upgrade the tower under the cursor |
-| `u` / `x` | upgrade / sell (75% back) |
-| `z` `c` `v` `b` | send bots to the rival; each send raises your pay |
+| Space / click | build |
+| `u` / `i` | upgrade the top / bottom path of the tower under the cursor |
+| `x` | sell (75% back) |
+| Enter | start the next round |
+| `A` | auto-start rounds |
 | `f` / `p` | fast-forward / pause |
 | `?` / `q` | help / quit |
 
-You can also click the build and send rows in the sidebar.
+You can also click the rows in the sidebar.
 
-**Towers** (each upgrades to level 4):
+Rounds start only when you press Enter, and clearing one pays a bonus. Killing bots pays too.
 
-| Tower | Cost | Does |
+**Upgrades:** each tower has two upgrade paths of four tiers each. One path can reach tier 4, but then the other path stops at tier 2. The sidebar shows a tower's tiers as `2-1` and so on.
+
+| Tower | Top path (`u`) | Bottom path (`i`) |
 | --- | --- | --- |
-| Gun turret | $150 | fast single shots |
-| Cannon | $320 | blasts a group |
-| Tesla coil | $450 | a bolt that arcs through 3 bots, and more as it levels |
-| Frost vent | $220 | slows every bot in range, and chips damage from level 3 |
+| Gun turret $170 | Oiled Gears → Belt Feed → Twin Barrels → **Minigun** | Long Barrel → AP Rounds → Scope → **Railgun** |
+| Cannon $350 | Bigger Shells → Heavy Shells → Cluster Shot → **Demolisher** | Fast Reload → Long Range → Stun Shells → **Shockwave** |
+| Tesla coil $450 | More Coils → Chain Storm → Arc Reactor → **Overload** | Capacitor → Long Arc → Static Field → **Supercell** |
+| Frost vent $240 | Deep Chill → Permafrost → Ice Shards → **Absolute Zero** | Wider Vent → Brittle → Cryo Burst → **Glacier** |
 
 **Bots:**
 - Scrap bots come in swarms.
 - Bolts are fast.
 - Brutes are tough.
-- Hulks are slow armored tanks that cost you 20 lives if they get through.
-
-A new wave comes every 20 seconds, and each wave is bigger. You get paid every 6 seconds, and killing bots pays a bounty too. Bigger sends unlock in later rounds.
+- Hulks are armored, so gun bullets bounce off them until the gun has **AP Rounds**. Cannons, tesla coils and frost vents can always hurt them.
 
 ## Agent messages
 
@@ -82,11 +84,11 @@ You can also drop a file into `~/.factory/inbox/`.
 
 ```bash
 go run .          # play from source
-go test ./...     # simulation, rival AI, sprites, input parsing, hooks, and a rendered frame
+go test ./...     # simulation, upgrade paths, armor, rounds, sprites, input parsing, hooks, and a rendered frame
 FACTORY_PNG=/tmp/f.png go test -run RenderPNG   # look at a frame
 ```
 
-- `td.go`: the rules: path, towers, bots, waves, sends, pay and the rival AI. 20 ticks a second, no drawing.
+- `td.go`: the rules: path, towers and their upgrade paths, bots, rounds and money. 20 ticks a second, no drawing.
 - `sprites.go`: hand-drawn 16×16 pixel art. Edit the letters to redraw a unit.
 - `render.go`: draws the sprites (rotated, anti-aliased, and cached for each tile size), the conveyors and the effects.
 - `term.go`: input parsing, the terminal capability probe, Kitty graphics and the half-block renderer.
