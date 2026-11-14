@@ -14,7 +14,7 @@ Inspired by [Terminactory](https://gitlab.com/snipedbywifi/terminactory).
 curl -fsSL https://raw.githubusercontent.com/thesnarkitecht/factory/main/install.sh | sh
 ```
 
-This puts `factory` in `~/.local/bin` (set `FACTORY_BIN_DIR` to change that). It downloads a prebuilt binary for macOS or Linux, or builds it with Go if no binary is published. To build from source yourself: `go install github.com/thesnarkitecht/factory@latest`.
+This puts `factory` in `~/.local/bin` (set `FACTORY_BIN_DIR` to change that). It downloads a prebuilt binary for macOS or Linux. If there is none, it builds from source, fetching a temporary copy of Go if you do not have one (no sudo or Homebrew needed). To build from source yourself: `go install github.com/thesnarkitecht/factory@latest`.
 
 ## Ghostty native
 
