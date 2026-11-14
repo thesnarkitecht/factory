@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"math"
 	"os"
 	"os/signal"
 	"regexp"
@@ -25,7 +24,7 @@ type App struct {
 	cw, ch     int // pixels per cell (1,2 in blocks mode)
 	realCW     int
 	realCH     int
-	view       View
+	tile       int
 	cur        [2]int
 	sel        int // tower kind to build, -1 none
 	paused     bool
@@ -53,7 +52,7 @@ func (a *App) layout() (mapCols, mapRows, sb int) {
 func (a *App) say(s string) { a.note, a.noteAt = s, time.Now() }
 
 func (a *App) newMatch() {
-	a.g = newGame(time.Now().UnixNano())
+	a.g = newGame()
 	a.g.onEvent = a.say
 	a.cur = [2]int{5, 2}
 	a.sel = int(Gun)
@@ -197,8 +196,7 @@ func run(forceBlocks bool) error {
 		a.draw()
 	}
 	restore()
-	g := a.g
-	fmt.Printf("factory: round %d, %d bots stopped, %d sent.\n", g.Round, g.You.Kills, g.You.Sent)
+	fmt.Printf("factory: reached round %d, %d bots stopped.\n", a.g.Round, a.g.Kills)
 	return nil
 }
 
@@ -213,34 +211,36 @@ func (a *App) moveCur(d int) {
 	}
 }
 
-func (a *App) buildOrUpgrade() {
-	b := a.g.You
-	if a.g.Over != "" {
-		return
-	}
-	if t := b.towerAt(a.cur[0], a.cur[1]); t != nil {
-		a.upgrade()
-		return
-	}
-	if a.sel < 0 {
+func (a *App) build() {
+	g := a.g
+	if a.sel < 0 || g.towerAt(a.cur[0], a.cur[1]) != nil {
 		return
 	}
 	switch {
 	case !buildable(a.cur[0], a.cur[1]):
 		a.say("Can't build on the conveyor")
-	case !b.build(TowerKind(a.sel), a.cur[0], a.cur[1]):
+	case !g.build(TowerKind(a.sel), a.cur[0], a.cur[1]):
 		a.say(fmt.Sprintf("Need %s for a %s", money(towerSpecs[a.sel].cost), towerSpecs[a.sel].name))
 	}
 }
 
-func (a *App) upgrade() {
-	t := a.g.You.towerAt(a.cur[0], a.cur[1])
+func (a *App) upgrade(p int) {
+	t := a.g.towerAt(a.cur[0], a.cur[1])
+	if t == nil {
+		return
+	}
+	u, ok, why := t.nextUpgrade(p)
 	switch {
-	case t == nil || a.g.Over != "":
-	case t.Lvl >= maxLevel:
-		a.say("That one is fully upgraded")
-	case !a.g.You.upgrade(t):
-		a.say("Need " + money(upgradeCost(t)) + " to upgrade")
+	case !ok:
+		a.say("That path is " + why)
+	case !a.g.upgrade(t, p):
+		a.say("Need " + money(u.cost) + " for " + u.name)
+	}
+}
+
+func (a *App) startRound() {
+	if !a.g.startRound() && a.g.Active {
+		a.say("Round already running")
 	}
 }
 
@@ -270,35 +270,34 @@ func (a *App) handle(e Event) bool {
 		a.sel = k
 	case "0", "esc":
 		a.sel = -1
-	case " ", "enter":
-		if g.Over != "" {
+	case " ":
+		a.build()
+	case "enter", "g":
+		if g.Over == "lose" {
 			a.newMatch()
 			return false
 		}
-		a.buildOrUpgrade()
-	case "u":
-		a.upgrade()
+		a.startRound()
+	case "u", ",":
+		a.upgrade(0)
+	case "i", ".":
+		a.upgrade(1)
 	case "x", "backspace":
-		if t := g.You.towerAt(a.cur[0], a.cur[1]); t != nil && g.Over == "" {
-			g.You.sell(t)
+		if t := g.towerAt(a.cur[0], a.cur[1]); t != nil {
+			g.sell(t)
 		}
-	case "z", "c", "v", "b":
-		for i, s := range sends {
-			if s.key == e.key {
-				switch {
-				case g.Round < s.minRound:
-					a.say(fmt.Sprintf("%ss can be sent from round %d", enemySpecs[s.kind].name, s.minRound))
-				case !g.send(i, g.You):
-					a.say("Need " + money(s.cost) + " to send that")
-				}
-			}
+	case "A":
+		g.Auto = !g.Auto
+		if g.Auto {
+			a.say("Auto-start on: rounds follow each other")
+			a.startRound()
 		}
 	case "p":
 		a.paused = !a.paused
 	case "f":
 		a.fast = !a.fast
 	case "r":
-		if g.Over != "" {
+		if g.Over == "lose" {
 			a.newMatch()
 		}
 	case "?":
@@ -330,12 +329,15 @@ func (a *App) mouse(e Event) {
 		}
 		return
 	}
-	if e.my < 1 || e.my > mr || a.view.T == 0 {
+	if e.my < 1 || e.my > mr || a.tile == 0 {
 		return
 	}
-	// cell center -> pixel -> tile on your board
-	px, py := e.mx*a.cw+a.cw/2, (e.my-1)*a.ch+a.ch/2
-	tx, ty := px/a.view.T, py/a.view.T
+	// cell center -> pixel -> tile (the board is centered horizontally)
+	px, py := e.mx*a.cw+a.cw/2-(mc*a.cw-boardW*a.tile)/2, (e.my-1)*a.ch+a.ch/2
+	if px < 0 {
+		return
+	}
+	tx, ty := px/a.tile, py/a.tile
 	if tx < 0 || ty < 0 || tx >= boardW || ty >= boardH {
 		return
 	}
@@ -349,13 +351,11 @@ func (a *App) mouse(e Event) {
 			a.help = false
 			return
 		}
-		if a.g.Over != "" {
+		if a.g.Over == "lose" {
 			a.newMatch()
 			return
 		}
-		if a.g.You.towerAt(tx, ty) == nil {
-			a.buildOrUpgrade()
-		}
+		a.build()
 	case 2:
 		a.sel = -1
 	}
@@ -443,11 +443,10 @@ const (
 )
 
 var towerHex = [numTower]uint32{0x5b8def, 0xb07a3a, 0xd9824a, 0x6fd6ff}
-var enemyHex = [numEnemy]uint32{0xa87b4f, 0x5ec8ff, 0xd9534f, 0x8a94a6}
 
 func hearts(n int) string {
 	c := uint32(good)
-	if n < 30 {
+	if n < 40 {
 		c = bad
 	}
 	return fg(c) + "♥ " + strconv.Itoa(max(0, n)) + reset
@@ -468,18 +467,19 @@ func (a *App) sidebar(w int) []string {
 			"Scrap bots ride the conveyor",
 			"toward your factory. Build",
 			"towers beside it to stop them.",
+			"Clear round " + itoa(winRound) + " to win.",
 			"",
-			"Every 6s you get paid. Send bots",
-			"to your rival (z c v b) to raise",
-			"your pay. Their sends hit you.",
-			"First factory to fall loses.",
+			"Each tower has two upgrade",
+			"paths. One can reach tier 4,",
+			"the other stops at tier 2.",
+			"Hulks are armored: plain gun",
+			"bullets bounce off them.",
 			"",
 			"arrows/mouse  move cursor",
-			"1-4  pick a tower",
-			"space/click  build or upgrade",
-			"u upgrade  x sell  right-click",
-			"  stop building",
-			"f fast  p pause  ? help  q quit",
+			"1-4 pick tower  space/click build",
+			"u / i  upgrade top / bottom path",
+			"x sell   enter  start round",
+			"A auto-start   f fast   p pause",
 			"",
 			fg(cash) + "Press any key to start" + fg(ink),
 		} {
@@ -488,20 +488,47 @@ func (a *App) sidebar(w int) []string {
 		return L
 	}
 
-	next := int(math.Ceil(g.nextRound - g.Time))
-	add(fmt.Sprintf(" %s\x1b[1mROUND %d%s   %snext wave %ds%s", fg(ink), g.Round, reset, fg(muted), next, reset))
-	pay := int(math.Ceil(g.nextPay - g.Time))
-	add(fmt.Sprintf(" %s  %sYOU%s    %s%s%s  %s+%s in %ds%s", hearts(g.You.Lives), fg(ink), reset, fg(cash), money(g.You.Money), reset, fg(muted), money(g.You.Income), pay, reset))
-	add(fmt.Sprintf(" %s  %sRIVAL%s  %s+%s pay, %d towers%s", hearts(g.Rival.Lives), fg(ink), reset, fg(muted), money(g.Rival.Income), len(g.Rival.Towers), reset))
+	add(fmt.Sprintf(" %s\x1b[1mROUND %d%s%s/%d   %s  %s%s", fg(ink), g.Round, reset, fg(muted), winRound, hearts(g.Lives), fg(cash)+"\x1b[1m", money(g.Money)+reset))
+	switch {
+	case g.Over == "lose":
+		add(fg(bad) + "\x1b[1m YOUR FACTORY FELL" + reset)
+		act("enter", " "+fg(ink)+"[enter] play again"+reset)
+	case g.Active:
+		left := len(g.queue) + len(g.Enemies)
+		add(fmt.Sprintf(" %s%d bots left in this round%s", fg(muted), left, reset))
+	default:
+		act("enter", fmt.Sprintf(" %s\x1b[1m▶ [enter] start round %d%s %s+%s bonus%s", fg(good), g.Round+1, reset, fg(muted), money(roundBonus(g.Round+1)), reset))
+	}
+	auto := "off"
+	if g.Auto {
+		auto = "on"
+	}
+	act("A", fmt.Sprintf(" %s[A] auto-start %s%s", fg(muted), auto, reset))
 
-	if g.Over != "" {
-		head("")
-		if g.Over == "win" {
-			add(fg(good) + "\x1b[1m  YOU WIN! The rival's factory fell." + reset)
-		} else {
-			add(fg(bad) + "\x1b[1m  YOUR FACTORY FELL." + reset)
+	if t := g.towerAt(a.cur[0], a.cur[1]); t != nil {
+		sp := towerSpecs[t.Kind]
+		s := t.stats()
+		head(fmt.Sprintf("%s  %d-%d", sp.name, t.Tier[0], t.Tier[1]))
+		desc := fmt.Sprintf("dmg %.0f · range %.1f · %.1f/s", s.dmg, s.rng, s.rate)
+		if t.Kind == Frost && s.dmg == 0 {
+			desc = fmt.Sprintf("slows to %d%% · range %.1f", int(s.slow*100), s.rng)
 		}
-		act("enter", fg(ink)+"  Enter or click: play again"+reset)
+		add(" " + fg(muted) + desc + reset)
+		for p, key := range []string{"u", "i"} {
+			pc := []uint32{cash, accent}[p]
+			pips := fg(pc) + strings.Repeat("●", t.Tier[p]) + fg(0x3a4252) + strings.Repeat("○", maxTier-t.Tier[p]) + reset
+			u, ok, why := t.nextUpgrade(p)
+			if !ok {
+				add(fmt.Sprintf(" %s %s%s%s", pips, fg(muted), why, reset))
+				continue
+			}
+			col := fg(ink)
+			if g.Money < u.cost {
+				col = fg(muted)
+			}
+			act(key, fmt.Sprintf(" %s %s[%s] %-13s%s%s", pips, col, key, u.name, fg(cash), money(u.cost))+reset)
+		}
+		act("x", fmt.Sprintf(" %s[x] sell %s%s   %s%d bots stopped%s", fg(ink), fg(cash), money(sellValue(t)), fg(muted), t.Pops, reset))
 	}
 
 	head("BUILD")
@@ -511,46 +538,13 @@ func (a *App) sidebar(w int) []string {
 		if a.sel == k {
 			mark = fg(accent) + "▸"
 		}
-		if g.You.Money < s.cost {
+		if g.Money < s.cost {
 			col = fg(muted)
 		}
 		act(strconv.Itoa(k+1), fmt.Sprintf("%s%s■ %s%d %-11s %s%5s%s", mark, fg(towerHex[k]), col, k+1, s.name, fg(cash), money(s.cost), reset))
 	}
-
-	if t := g.You.towerAt(a.cur[0], a.cur[1]); t != nil {
-		s := t.stats()
-		head(fmt.Sprintf("%s  level %d/%d", towerSpecs[t.Kind].name, t.Lvl, maxLevel))
-		desc := fmt.Sprintf("dmg %.1f  range %.1f  %.1f/s", s.dmg, s.rng, s.rate)
-		if s.slow > 0 {
-			desc = fmt.Sprintf("slows to %d%%  range %.1f", int(s.slow*100), s.rng)
-		}
-		add(" " + fg(muted) + desc + reset)
-		if t.Lvl < maxLevel {
-			col := fg(ink)
-			if g.You.Money < upgradeCost(t) {
-				col = fg(muted)
-			}
-			act("u", fmt.Sprintf(" %s[u] upgrade %s%s", col, fg(cash), money(upgradeCost(t)))+reset)
-		}
-		act("x", fmt.Sprintf(" %s[x] sell for %s%s", fg(ink), fg(cash), money(sellValue(t)))+reset)
-	} else if a.sel >= 0 {
-		add("")
-		add(" " + fg(muted) + towerSpecs[a.sel].name + ": " + towerSpecs[a.sel].blurb + reset)
-	}
-
-	head("SEND TO RIVAL  " + fg(muted) + "raises your pay")
-	for _, s := range sends {
-		col, tail := fg(ink), ""
-		if g.Round < s.minRound {
-			col, tail = fg(0x4c5566), fmt.Sprintf(" r%d", s.minRound)
-		} else if g.You.Money < s.cost {
-			col = fg(muted)
-		}
-		label := fmt.Sprintf("%d %s", s.count, enemySpecs[s.kind].name)
-		if s.count > 1 {
-			label += "s"
-		}
-		act(s.key, fmt.Sprintf(" %s[%s] %s■%s %-13s%s%5s %s+%d%s%s", col, s.key, fg(enemyHex[s.kind]), col, label, fg(cash), money(s.cost), fg(good), s.income, fg(muted)+tail, reset))
+	if a.sel >= 0 && g.towerAt(a.cur[0], a.cur[1]) == nil {
+		add(" " + fg(muted) + towerSpecs[a.sel].blurb + reset)
 	}
 
 	if len(a.msgs) > 0 {
@@ -578,11 +572,11 @@ func (a *App) draw() {
 	t := time.Since(a.t0).Seconds()
 
 	sel := a.sel
-	if g.Over != "" {
+	if g.Over == "lose" {
 		sel = -1
 	}
-	f, v := a.r.draw(g, mc*a.cw, mr*a.ch, a.cur, sel, t, a.scr.mode != gfxBlocks)
-	a.view = v
+	f, T := a.r.draw(g, mc*a.cw, mr*a.ch, a.cur, sel, t)
+	a.tile = T
 	a.scr.drawImage(&w, f, 0, 1, mc, mr)
 
 	title := fg(cash) + "\x1b[1m ⚙ FACTORY " + reset + bg(0x0f1218) + fg(muted)
@@ -593,18 +587,17 @@ func (a *App) draw() {
 		title += fg(accent) + " ▸▸ FAST " + fg(muted)
 	}
 	switch {
-	case g.Over == "win":
-		title += fg(good) + "  You win! Enter for a rematch"
 	case g.Over == "lose":
-		title += fg(bad) + "  Your factory fell. Enter to try again"
+		title += fg(bad) + "  Your factory fell on round " + itoa(g.Round) + ". Enter to try again"
 	case a.note != "" && time.Since(a.noteAt) < 5*time.Second:
 		title += " " + fg(ink) + a.note
+	case !g.Active && g.Round == 0:
+		title += " " + fg(ink) + "Build a few towers, then press Enter to send round 1"
 	case sb == 0:
-		title += fmt.Sprintf(" round %d  %s  %s  rival %s", g.Round, hearts(g.You.Lives), money(g.You.Money), hearts(g.Rival.Lives))
-	default:
-		if v.RivalT > 0 && v.RivalY == 0 {
-			title += strings.Repeat(" ", max(1, v.RivalX/max(1, a.cw)-12)) + fg(muted) + "rival's board ▾"
-		}
+		title += fmt.Sprintf(" round %d  %s  %s", g.Round, hearts(g.Lives), money(g.Money))
+	}
+	if g.Over == "win" {
+		title += fg(good) + "  ★ won"
 	}
 	put(&w, 0, 0, a.cols, bg(0x0f1218), title)
 
@@ -625,7 +618,7 @@ func (a *App) draw() {
 		s := towerSpecs[k]
 		label := fmt.Sprintf(" %d %s %s ", k+1, s.name, money(s.cost))
 		col := fg(ink)
-		if g.You.Money < s.cost {
+		if g.Money < s.cost {
 			col = fg(0x4c5566)
 		}
 		seg := fg(towerHex[k]) + "■" + col + label
@@ -637,15 +630,15 @@ func (a *App) draw() {
 		tb.WriteString(seg + " ")
 	}
 	put(&w, a.rows-2, 0, a.cols, bg(0x0f1218), " "+tb.String())
-	hints := "move ←↑→↓/mouse  build/upgrade ␣/click  sell x  send z c v b  fast f  pause p  help ?  quit q"
+	hints := "move ←↑→↓/mouse  build ␣/click  upgrade u i  sell x  start round ⏎  fast f  pause p  help ?  quit q"
 	put(&w, a.rows-1, 0, a.cols-1, bg(0x0f1218), fg(muted)+" "+hints) // never touch the bottom-right cell: some terminals scroll
 
 	if a.ghostty { // tab progress bar = your lives; red when low
 		state := 1
-		if g.You.Lives < 30 {
+		if g.Lives < 40 {
 			state = 2
 		}
-		p := fmt.Sprintf("\x1b]9;4;%d;%d\x07\x1b]2;factory · round %d\x07", state, max(0, g.You.Lives), g.Round)
+		p := fmt.Sprintf("\x1b]9;4;%d;%d\x07\x1b]2;factory · round %d\x07", state, g.Lives*100/startLives, g.Round)
 		if p != a.lastProg {
 			a.lastProg = p
 			w.WriteString(p)

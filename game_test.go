@@ -3,7 +3,6 @@ package main
 import (
 	"image"
 	"image/png"
-	"math"
 	"os"
 	"strings"
 	"testing"
@@ -45,107 +44,135 @@ func TestSpritesAreSquare(t *testing.T) {
 	}
 }
 
-func TestUndefendedLeaks(t *testing.T) {
-	g := newGame(1)
-	g.ai.next = math.Inf(1) // rival idle
-	sim(g, firstRound+45)
-	if g.You.Lives >= startLives {
-		t.Fatal("bots never reached the factory")
+// playRound starts the next round and runs until it is cleared or lost.
+func playRound(g *Game) {
+	g.startRound()
+	for i := 0; i < tps*300 && g.Active && g.Over != "lose"; i++ {
+		g.update()
 	}
 }
 
-func TestTowersDefendAndPay(t *testing.T) {
-	g := newGame(1)
-	g.ai.next = math.Inf(1)
-	g.You.Money = 10000
+func TestUndefendedLeaks(t *testing.T) {
+	g := newGame()
+	playRound(g)
+	if g.Lives >= startLives || g.Active {
+		t.Fatalf("lives %d active %v", g.Lives, g.Active)
+	}
+}
+
+func TestRoundsPayBonusAndWait(t *testing.T) {
+	g := newGame()
+	g.Money = 10000
 	for _, xy := range [][2]int{{5, 2}, {8, 2}, {11, 2}, {6, 5}} {
-		if !g.You.build(Gun, xy[0], xy[1]) {
+		if !g.build(Gun, xy[0], xy[1]) {
 			t.Fatalf("build at %v failed", xy)
 		}
 	}
-	m := g.You.Money
-	sim(g, firstRound+15) // round 1: scrap bots only
-	if g.You.Lives != startLives {
-		t.Fatalf("lost lives: %d", g.You.Lives)
+	m := g.Money
+	sim(g, 5)
+	if g.Round != 0 || len(g.Enemies) != 0 {
+		t.Fatal("rounds must wait for the player")
 	}
-	if g.You.Kills == 0 || g.You.Money <= m {
-		t.Fatalf("kills %d money %d (was %d)", g.You.Kills, g.You.Money, m)
+	playRound(g)
+	if g.Lives != startLives || g.Kills != len(wave(1)) {
+		t.Fatalf("lives %d kills %d", g.Lives, g.Kills)
+	}
+	if g.Money != m+len(wave(1))*enemySpecs[Scrap].bounty+roundBonus(1) {
+		t.Fatalf("money %d", g.Money)
+	}
+	g.Auto = true
+	playRound(g)
+	if g.Round < 3 || !g.Active {
+		t.Fatalf("auto-start: round %d active %v", g.Round, g.Active)
 	}
 }
 
-func TestBuildRules(t *testing.T) {
-	b := newBoard()
-	if b.build(Gun, 3, 1) {
-		t.Fatal("built on the path")
+func TestUpgradePaths(t *testing.T) {
+	g := newGame()
+	g.Money = 100000
+	g.build(Gun, 0, 0)
+	tw := g.towerAt(0, 0)
+	for i := 0; i < 4; i++ {
+		if !g.upgrade(tw, 0) {
+			t.Fatalf("top path tier %d failed", i+1)
+		}
 	}
-	if !b.build(Gun, 0, 0) || b.build(Gun, 0, 0) {
-		t.Fatal("tile should take exactly one tower")
+	if g.upgrade(tw, 0) {
+		t.Fatal("went past tier 4")
 	}
-	b.Money = 0
-	if b.build(Gun, 1, 0) {
-		t.Fatal("built without money")
+	if !g.upgrade(tw, 1) || !g.upgrade(tw, 1) || g.upgrade(tw, 1) {
+		t.Fatal("bottom path should stop at tier 2 once top passes it")
 	}
-	b.Money = 10000
-	tw := b.towerAt(0, 0)
-	for b.upgrade(tw) {
+	s := tw.stats()
+	if s.shots != 3 || !s.pierce || s.rate <= towerSpecs[Gun].base.rate*4 {
+		t.Fatalf("stats %+v", s)
 	}
-	if tw.Lvl != maxLevel {
-		t.Fatalf("lvl %d", tw.Lvl)
-	}
-	before, value := b.Money, sellValue(tw)
-	b.sell(tw)
-	if b.Money != before+value || b.towerAt(0, 0) != nil {
+	before, value := g.Money, sellValue(tw)
+	g.sell(tw)
+	if g.Money != before+value || g.towerAt(0, 0) != nil {
 		t.Fatal("sell")
 	}
 }
 
-func TestSendRaisesPayAndSpawnsOnRival(t *testing.T) {
-	g := newGame(1)
-	g.ai.next = math.Inf(1)
-	if g.send(0, g.You) {
-		t.Fatal("sends are locked before round 1")
+func TestBuildRules(t *testing.T) {
+	g := newGame()
+	if g.build(Gun, 3, 1) {
+		t.Fatal("built on the path")
 	}
-	sim(g, firstRound+0.1)
-	m, inc := g.You.Money, g.You.Income
-	if !g.send(0, g.You) {
-		t.Fatal("send failed")
+	if !g.build(Gun, 0, 0) || g.build(Gun, 0, 0) {
+		t.Fatal("tile should take exactly one tower")
 	}
-	if g.You.Money != m-sends[0].cost || g.You.Income != inc+sends[0].income {
-		t.Fatal("send did not cost money / raise pay")
+	g.Money = 0
+	if g.build(Gun, 1, 0) {
+		t.Fatal("built without money")
 	}
-	rivalBefore := len(g.Rival.queue) + len(g.Rival.Enemies)
-	if rivalBefore < sends[0].count {
-		t.Fatal("sent bots missing on rival board")
+}
+
+func TestArmorNeedsPierce(t *testing.T) {
+	g := newGame()
+	g.Money = 100000
+	g.build(Gun, 4, 2)
+	tw := g.towerAt(4, 2)
+	e := &Enemy{Kind: Hulk, HP: 50, MaxHP: 50, Dist: 4}
+	g.Enemies = []*Enemy{e}
+	g.fire(tw)
+	if e.HP != 50 {
+		t.Fatal("plain bullets hurt an armored hulk")
+	}
+	g.upgrade(tw, 1)
+	g.upgrade(tw, 1) // AP Rounds
+	tw.cd = 0
+	g.fire(tw)
+	if e.HP >= 50 {
+		t.Fatal("AP rounds should pierce armor")
 	}
 }
 
 func TestFrostSlows(t *testing.T) {
-	b := newBoard()
-	b.build(Frost, 4, 2)
-	g := &Game{You: b, Rival: newBoard(), ai: &AI{next: math.Inf(1)}, nextRound: math.Inf(1), nextPay: math.Inf(1)}
+	g := newGame()
+	g.build(Frost, 4, 2)
 	e := &Enemy{Kind: Scrap, HP: 100, MaxHP: 100, Dist: 4} // at (3,1), in range
-	b.Enemies = []*Enemy{e}
-	g.step(b)
+	g.Enemies = []*Enemy{e}
+	g.step()
 	if e.Slow <= 0 || e.Dist >= 4+enemySpecs[Scrap].speed*dt {
 		t.Fatalf("not slowed: slow %v dist %v", e.Slow, e.Dist)
 	}
 }
 
-func TestRivalBuildsAndCanLose(t *testing.T) {
-	g := newGame(2)
-	sim(g, 120)
-	if len(g.Rival.Towers) < 2 {
-		t.Fatalf("rival built %d towers", len(g.Rival.Towers))
+func TestLoseAndWin(t *testing.T) {
+	g := newGame()
+	g.Lives = 1
+	playRound(g)
+	if g.Over != "lose" || g.build(Gun, 0, 0) {
+		t.Fatalf("over %q", g.Over)
 	}
-	for _, tw := range g.Rival.Towers {
-		if !buildable(tw.X, tw.Y) {
-			t.Fatalf("rival tower on path at %d,%d", tw.X, tw.Y)
-		}
-	}
-	g.Over, g.You.Lives, g.Rival.Lives = "", startLives, 0
+	g = newGame()
+	g.Round = winRound - 1
+	g.startRound()
+	g.queue, g.Enemies = nil, nil
 	g.update()
-	if g.Over != "win" {
-		t.Fatalf("over = %q", g.Over)
+	if g.Over != "win" || g.Active {
+		t.Fatalf("over %q", g.Over)
 	}
 }
 
@@ -179,20 +206,22 @@ func TestHookAndInbox(t *testing.T) {
 
 // TestRenderPNG renders a mid-match frame; set FACTORY_PNG=path to look at it.
 func TestRenderPNG(t *testing.T) {
-	g := newGame(3)
-	g.You.Money = 100000
+	g := newGame()
+	g.Money = 1000000
 	for i, xy := range [][2]int{{5, 2}, {9, 2}, {12, 3}, {6, 5}, {4, 7}, {9, 9}, {15, 9}, {11, 6}} {
-		g.You.build(TowerKind(i%4), xy[0], xy[1])
+		g.build(TowerKind(i%4), xy[0], xy[1])
 	}
-	for _, tw := range g.You.Towers[:4] {
-		g.You.upgrade(tw)
+	for i, tw := range g.Towers[:6] {
+		for j := 0; j <= i%5; j++ {
+			g.upgrade(tw, i%2)
+		}
 	}
-	sim(g, firstRound+roundEvery*4+6)
-	g.send(2, g.Rival)
-	sim(g, 6)
-	f, v := newRenderer().draw(g, 1200, 560, [2]int{11, 6}, int(Cannon), 1.3, true)
-	if v.T == 0 || v.RivalT == 0 {
-		t.Fatalf("view %+v", v)
+	g.Round = 13
+	g.startRound()
+	sim(g, 9)
+	f, T := newRenderer().draw(g, 1000, 660, [2]int{11, 6}, int(Cannon), 1.3)
+	if T == 0 {
+		t.Fatal("no tiles")
 	}
 	if out := os.Getenv("FACTORY_PNG"); out != "" {
 		img := image.NewRGBA(image.Rect(0, 0, f.w, f.h))
