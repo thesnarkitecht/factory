@@ -1,12 +1,12 @@
 # factory
 
-A cozy factory game for your terminal, drawn in real pixel art when you play it in [Ghostty](https://ghostty.org).
-Mine ore, smelt it, craft parts and sell them. Nothing attacks you and nothing breaks; the factory keeps earning while you're away.
+A pixel-art tower defense game for your terminal. It looks best in [Ghostty](https://ghostty.org).
+
+Waves of scrap bots ride a conveyor toward your factory. Place towers along the conveyor and upgrade them to stop the bots. Your money comes in on a timer, like the classic tower defense battle games: spend some of it sending bots to your rival's conveyor, and your pay goes up. The rival does the same to you. Whichever factory falls first loses.
+
 It's made to sit in a split next to your AI agents, and they can send you messages that show up in the game.
 
-Inspired by [Terminactory](https://gitlab.com/snipedbywifi/terminactory).
-
-![A small factory](docs/screenshot.png)
+![Your board with the rival's below it](docs/screenshot.png)
 
 ## Install
 
@@ -20,8 +20,8 @@ This puts `factory` in `~/.local/bin` (set `FACTORY_BIN_DIR` to change that). It
 
 - **Pixel graphics** through the Kitty graphics protocol, drawn at your screen's real pixel size, so sprites stay sharp on Retina displays. When you play locally, frames go through a temp file instead of the terminal stream.
 - **Synchronized output** (mode 2026), so frames never tear.
-- **Tab progress bar** (OSC 9;4) that fills toward the $50,000 goal, and **desktop notifications** (OSC 9) when an agent messages you.
-- **Mouse**: click to build, drag to lay belts, right-click to remove, scroll to zoom.
+- **Tab progress bar** (OSC 9;4) that shows your lives and turns red when they run low, and **desktop notifications** (OSC 9) when an agent messages you.
+- **Mouse**: the cursor follows your pointer. Click to build or upgrade, and right-click to stop placing.
 
 It works in other terminals too. At startup it asks the terminal what it supports. Kitty, and any other terminal that answers the graphics probe, gets the same pixel graphics. Everything else, including tmux, gets a truecolor half-block renderer. `factory --blocks` forces the half-block renderer.
 
@@ -29,31 +29,32 @@ It works in other terminals too. At startup it asks the terminal what it support
 
 | Key | Does |
 | --- | --- |
-| arrows / wasd / hjkl | move the cursor |
-| Shift+arrows / WASD | lay a line of the selected building (belts!) |
-| `1`–`5` | pick Belt, Drill, Furnace, Assembler, Trade post (`0` to inspect only) |
-| Space / Enter / click | build |
-| `x` / right-click | remove (full refund) |
-| `r` `R` | rotate |
-| `f` | change an assembler's recipe |
-| `+` `-` / scroll | zoom |
-| `c` | center the view |
-| `p` | pause |
-| `?` | help |
-| `n` | clear messages |
-| Ctrl+S / `q` | save / save and quit |
+| arrows / wasd / mouse | move the cursor |
+| `1`–`4` | pick a tower (press again to stop placing) |
+| Space / Enter / click | build, or upgrade the tower under the cursor |
+| `u` / `x` | upgrade / sell (75% back) |
+| `z` `c` `v` `b` | send bots to the rival; each send raises your pay |
+| `f` / `p` | fast-forward / pause |
+| `?` / `q` | help / quit |
 
-How it works:
+You can also click the build and send rows in the sidebar.
 
-- **Drills** mine the ore under them and push it out of their yellow side.
-- **Belts** carry the ore.
-- **Furnaces** smelt ore into plates and stone into bricks. Each coal they burn covers 4 smelts.
-- **Assemblers** make gears, wire, circuits and engines. They unlock as your total earnings grow.
-- **Trade posts** buy anything you deliver to them.
+**Towers** (each upgrades to level 4):
 
-A machine that's stuck shows a blinking red dot. Move the cursor onto it to see why in the sidebar: `NO ORE`, `NEED COAL`, `NEED INPUT` or `FULL`.
+| Tower | Cost | Does |
+| --- | --- | --- |
+| Gun turret | $150 | fast single shots |
+| Cannon | $320 | blasts a group |
+| Tesla coil | $450 | a bolt that arcs through 3 bots, and more as it levels |
+| Frost vent | $220 | slows every bot in range, and chips damage from level 3 |
 
-The game autosaves to `~/.factory/save.json` every 30 seconds and when you quit. `factory --new` starts over and keeps the old save as `save.json.bak`.
+**Bots:**
+- Scrap bots come in swarms.
+- Bolts are fast.
+- Brutes are tough.
+- Hulks are slow armored tanks that cost you 20 lives if they get through.
+
+A new wave comes every 20 seconds, and each wave is bigger. You get paid every 6 seconds, and killing bots pays a bounty too. Bigger sends unlock in later rounds.
 
 ## Agent messages
 
@@ -81,13 +82,14 @@ You can also drop a file into `~/.factory/inbox/`.
 
 ```bash
 go run .          # play from source
-go test ./...     # simulation, input parsing, hooks, and a rendered frame
-FACTORY_PNG=/tmp/f.png go test -run RenderPNG   # look at the sprites
+go test ./...     # simulation, rival AI, sprites, input parsing, hooks, and a rendered frame
+FACTORY_PNG=/tmp/f.png go test -run RenderPNG   # look at a frame
 ```
 
-- `sim.go`: the rules. 20 ticks a second, no drawing.
-- `render.go`: procedural pixel-art sprites, cached for each zoom level.
-- `term.go`: input parsing, terminal capability probe, Kitty graphics and the half-block renderer.
-- `main.go`: the app loop, UI panels and CLI.
+- `td.go`: the rules: path, towers, bots, waves, sends, pay and the rival AI. 20 ticks a second, no drawing.
+- `sprites.go`: hand-drawn 16×16 pixel art. Edit the letters to redraw a unit.
+- `render.go`: draws the sprites (rotated, anti-aliased, and cached for each tile size), the conveyors and the effects.
+- `term.go`: input parsing, the terminal capability probe, Kitty graphics and the half-block renderer.
+- `app.go`, `main.go`: the game loop, the UI panels and the CLI.
 
-Releases: push a `v*` tag. CI builds the macOS and Linux binaries that the install script downloads.
+Releases: push a `v*` tag. CI then builds the macOS and Linux binaries that the install script downloads.
