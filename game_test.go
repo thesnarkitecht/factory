@@ -3,119 +3,154 @@ package main
 import (
 	"image"
 	"image/png"
+	"math"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// starter builds drill(copper)+drill(coal) -> furnace -> belt -> trade post.
-func starter(t *testing.T) *Game {
+func sim(g *Game, secs float64) {
+	for i := 0; i < int(secs*tps); i++ {
+		g.update()
+	}
+}
+
+func TestPathConnected(t *testing.T) {
+	p := pathOrder()
+	for i := 1; i < len(p); i++ {
+		if abs(p[i][0]-p[i-1][0])+abs(p[i][1]-p[i-1][1]) != 1 {
+			t.Fatalf("path breaks at %v -> %v", p[i-1], p[i])
+		}
+	}
+	if p[len(p)-1] != factoryTile {
+		t.Fatalf("path ends at %v, factory at %v", p[len(p)-1], factoryTile)
+	}
+	if x, y := pos(pathLen); x != 16 || y != 10 {
+		t.Fatalf("pos(end) = %v,%v", x, y)
+	}
+}
+
+func TestSpritesAreSquare(t *testing.T) {
+	for name, rows := range sprites {
+		for i, r := range rows {
+			if len(r) != 16 {
+				t.Fatalf("%s row %d is %d wide", name, i, len(r))
+			}
+			for _, c := range []byte(r) {
+				if _, ok := palette[c]; !ok && c != '.' && c != 'a' && c != 'A' {
+					t.Fatalf("%s uses unknown color %q", name, c)
+				}
+			}
+		}
+	}
+}
+
+func TestUndefendedLeaks(t *testing.T) {
 	g := newGame(1)
-	g.Money = 10000
-	for i := range g.ore {
-		g.ore[i] = None
-	}
-	g.ore[10*g.W+10] = CopperOre
-	g.ore[9*g.W+11] = Coal
-	ok := g.place(10, 10, Drill, 1) && // copper drill -> furnace at (11,10)
-		g.place(11, 9, Drill, 2) && // coal drill pointing down into furnace
-		g.place(11, 10, Furnace, 1) &&
-		g.place(12, 10, Belt, 1) && g.place(13, 10, Belt, 1) &&
-		g.place(14, 10, Trade, 0)
-	if !ok {
-		t.Fatal("place failed")
-	}
-	return g
-}
-
-func TestChainEarns(t *testing.T) {
-	g := starter(t)
-	for i := 0; i < tps*60; i++ {
-		g.update()
-	}
-	if g.Sold[CopperPlate] < 10 {
-		t.Fatalf("sold %d copper plates in a minute, want >=10 (status %q)", g.Sold[CopperPlate], g.at(11, 10).Status)
-	}
-	if g.Earned <= 0 || g.rate() <= 0 {
-		t.Fatal("no income recorded")
+	g.ai.next = math.Inf(1) // rival idle
+	sim(g, firstRound+45)
+	if g.You.Lives >= startLives {
+		t.Fatal("bots never reached the factory")
 	}
 }
 
-func TestFurnaceNeedsCoal(t *testing.T) {
-	g := starter(t)
-	g.remove(11, 9)
-	for i := 0; i < tps*10; i++ {
-		g.update()
-	}
-	if s := g.at(11, 10).Status; s != "NEED COAL" {
-		t.Fatalf("status %q", s)
-	}
-}
-
-func TestAssemblerAndUnlocks(t *testing.T) {
+func TestTowersDefendAndPay(t *testing.T) {
 	g := newGame(1)
-	if g.place(5, 5, Assembler, 1) {
-		t.Fatal("assembler should be locked")
+	g.ai.next = math.Inf(1)
+	g.You.Money = 10000
+	for _, xy := range [][2]int{{5, 2}, {8, 2}, {11, 2}, {6, 5}} {
+		if !g.You.build(Gun, xy[0], xy[1]) {
+			t.Fatalf("build at %v failed", xy)
+		}
 	}
-	g.Earned = 300
-	if !g.place(5, 5, Assembler, 1) {
-		t.Fatal("assembler should unlock at 300")
+	m := g.You.Money
+	sim(g, firstRound+15) // round 1: scrap bots only
+	if g.You.Lives != startLives {
+		t.Fatalf("lost lives: %d", g.You.Lives)
 	}
-	b := g.at(5, 5)
-	g.cycleRecipe(b)
-	if b.Recipe != 1 { // wire
-		t.Fatalf("recipe %d", b.Recipe)
-	}
-	g.cycleRecipe(b) // circuit locked -> back to gear
-	if b.Recipe != 0 {
-		t.Fatalf("recipe %d, circuit should be locked", b.Recipe)
-	}
-	for i := 0; i < 2; i++ {
-		g.accept(5, 5, IronPlate, 1)
-	}
-	for i := 0; i < tps*2; i++ {
-		g.update()
-	}
-	if len(b.Out) != 1 || b.Out[0] != Gear {
-		t.Fatalf("out %v", b.Out)
+	if g.You.Kills == 0 || g.You.Money <= m {
+		t.Fatalf("kills %d money %d (was %d)", g.You.Kills, g.You.Money, m)
 	}
 }
 
-func TestRefundAndMoney(t *testing.T) {
+func TestBuildRules(t *testing.T) {
+	b := newBoard()
+	if b.build(Gun, 3, 1) {
+		t.Fatal("built on the path")
+	}
+	if !b.build(Gun, 0, 0) || b.build(Gun, 0, 0) {
+		t.Fatal("tile should take exactly one tower")
+	}
+	b.Money = 0
+	if b.build(Gun, 1, 0) {
+		t.Fatal("built without money")
+	}
+	b.Money = 10000
+	tw := b.towerAt(0, 0)
+	for b.upgrade(tw) {
+	}
+	if tw.Lvl != maxLevel {
+		t.Fatalf("lvl %d", tw.Lvl)
+	}
+	before, value := b.Money, sellValue(tw)
+	b.sell(tw)
+	if b.Money != before+value || b.towerAt(0, 0) != nil {
+		t.Fatal("sell")
+	}
+}
+
+func TestSendRaisesPayAndSpawnsOnRival(t *testing.T) {
 	g := newGame(1)
-	m := g.Money
-	g.place(1, 1, Drill, 0)
-	g.remove(1, 1)
-	if g.Money != m {
-		t.Fatalf("money %d want %d", g.Money, m)
+	g.ai.next = math.Inf(1)
+	if g.send(0, g.You) {
+		t.Fatal("sends are locked before round 1")
 	}
-	g.Money = 0
-	if g.place(1, 1, Drill, 0) {
-		t.Fatal("placed without money")
+	sim(g, firstRound+0.1)
+	m, inc := g.You.Money, g.You.Income
+	if !g.send(0, g.You) {
+		t.Fatal("send failed")
+	}
+	if g.You.Money != m-sends[0].cost || g.You.Income != inc+sends[0].income {
+		t.Fatal("send did not cost money / raise pay")
+	}
+	rivalBefore := len(g.Rival.queue) + len(g.Rival.Enemies)
+	if rivalBefore < sends[0].count {
+		t.Fatal("sent bots missing on rival board")
 	}
 }
 
-func TestSaveLoad(t *testing.T) {
-	g := starter(t)
-	for i := 0; i < tps*20; i++ {
-		g.update()
+func TestFrostSlows(t *testing.T) {
+	b := newBoard()
+	b.build(Frost, 4, 2)
+	g := &Game{You: b, Rival: newBoard(), ai: &AI{next: math.Inf(1)}, nextRound: math.Inf(1), nextPay: math.Inf(1)}
+	e := &Enemy{Kind: Scrap, HP: 100, MaxHP: 100, Dist: 4} // at (3,1), in range
+	b.Enemies = []*Enemy{e}
+	g.step(b)
+	if e.Slow <= 0 || e.Dist >= 4+enemySpecs[Scrap].speed*dt {
+		t.Fatalf("not slowed: slow %v dist %v", e.Slow, e.Dist)
 	}
-	p := filepath.Join(t.TempDir(), "s.json")
-	if err := g.save(p); err != nil {
-		t.Fatal(err)
+}
+
+func TestRivalBuildsAndCanLose(t *testing.T) {
+	g := newGame(2)
+	sim(g, 120)
+	if len(g.Rival.Towers) < 2 {
+		t.Fatalf("rival built %d towers", len(g.Rival.Towers))
 	}
-	h, _, _, err := load(p)
-	if err != nil {
-		t.Fatal(err)
+	for _, tw := range g.Rival.Towers {
+		if !buildable(tw.X, tw.Y) {
+			t.Fatalf("rival tower on path at %d,%d", tw.X, tw.Y)
+		}
 	}
-	if h.Money != g.Money || h.at(11, 10) == nil || h.at(11, 10).Kind != Furnace {
-		t.Fatal("round trip lost state")
+	g.Over, g.You.Lives, g.Rival.Lives = "", startLives, 0
+	g.update()
+	if g.Over != "win" {
+		t.Fatalf("over = %q", g.Over)
 	}
 }
 
 func TestParseInput(t *testing.T) {
-	ev := parseInput([]byte("a\x1b[A\x1b[1;2C\x1b[<0;5;7M\x1b[<32;6;7M\x1b[<0;6;7m\x03\x1b_Gi=1;OK\x1b\\é"))
+	ev := parseInput([]byte("a\x1b[A\x1b[1;2C\x1b[<0;5;7M\x1b[<35;6;7M\x1b[<0;6;7m\x03\x1b_Gi=1;OK\x1b\\é"))
 	var got []string
 	for _, e := range ev {
 		got = append(got, e.key)
@@ -124,7 +159,7 @@ func TestParseInput(t *testing.T) {
 	if strings.Join(got, " ") != want {
 		t.Fatalf("got %q", strings.Join(got, " "))
 	}
-	if ev[3].mx != 4 || ev[3].my != 6 || !ev[3].press || ev[4].mov != true || ev[5].press {
+	if ev[3].mx != 4 || ev[3].my != 6 || !ev[3].press || !ev[4].mov || ev[4].btn != 3 || ev[5].press {
 		t.Fatalf("mouse %+v %+v %+v", ev[3], ev[4], ev[5])
 	}
 }
@@ -142,25 +177,23 @@ func TestHookAndInbox(t *testing.T) {
 	}
 }
 
-// TestRenderPNG renders a frame; set FACTORY_PNG=path to look at it.
+// TestRenderPNG renders a mid-match frame; set FACTORY_PNG=path to look at it.
 func TestRenderPNG(t *testing.T) {
-	g := starter(t)
-	g.Earned = 9000
-	g.ore[12*g.W+12], g.ore[12*g.W+13] = IronOre, IronOre
-	g.place(12, 12, Drill, 3)
-	g.place(10, 12, Assembler, 0)
-	for x := 8; x < 15; x++ {
-		g.place(x, 14, Belt, 1)
+	g := newGame(3)
+	g.You.Money = 100000
+	for i, xy := range [][2]int{{5, 2}, {9, 2}, {12, 3}, {6, 5}, {4, 7}, {9, 9}, {15, 9}, {11, 6}} {
+		g.You.build(TowerKind(i%4), xy[0], xy[1])
 	}
-	for i := 0; i < tps*5; i++ {
-		g.update()
+	for _, tw := range g.You.Towers[:4] {
+		g.You.upgrade(tw)
 	}
-	for i, it := range []Item{IronOre, Gear, Circuit, Wire, Brick, Engine, Coal} {
-		g.at(8+i, 14).Item, g.at(8+i, 14).Prog = it, 0.5
+	sim(g, firstRound+roundEvery*4+6)
+	g.send(2, g.Rival)
+	sim(g, 6)
+	f, v := newRenderer().draw(g, 1200, 560, [2]int{11, 6}, int(Cannon), 1.3, true)
+	if v.T == 0 || v.RivalT == 0 {
+		t.Fatalf("view %+v", v)
 	}
-	r := newRenderer()
-	r.setTile(40, 40)
-	f := r.draw(g, 6, 6, 400, 400, 12, 10, Belt, 1, 0.3)
 	if out := os.Getenv("FACTORY_PNG"); out != "" {
 		img := image.NewRGBA(image.Rect(0, 0, f.w, f.h))
 		for i := 0; i < f.w*f.h; i++ {
